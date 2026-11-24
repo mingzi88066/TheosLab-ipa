@@ -64,13 +64,12 @@ struct DirectoryBrowser: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-                if current != root {
-                    ToolbarItem(placement: .bottomBar) {
-                        Button {
-                            current = current.deletingLastPathComponent()
-                            load()
-                        } label: { Label("上一级", systemImage: "arrow.up") }
-                    }
+                ToolbarItem(placement: .bottomBar) {
+                    Button {
+                        current = current.deletingLastPathComponent()
+                        load()
+                    } label: { Label("上一级", systemImage: "arrow.up") }
+                    .disabled(current == root)
                 }
             }
         }
