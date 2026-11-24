@@ -27,7 +27,7 @@ final class TheosRuntime: @unchecked Sendable {
 
     /// Bump whenever the embedded image changes (new SDK, new toolchain package).
     /// Installs left over from an older build are dropped and re-copied once.
-    private static let environmentVersion = 4
+    private static let environmentVersion = 5
     private static let environmentKey = "theoslab.environmentVersion"
     static let bootLock = NSLock()
     private(set) static var lastBootError: String?
@@ -77,18 +77,28 @@ final class TheosRuntime: @unchecked Sendable {
         let bundledRoot = support.appendingPathComponent("Alpine-Offline-1")
         // `/sbin/ishsv` is the PID-1 supervisor the kernel execve's; without it the
         // embedded Linux never starts and boot only reports a generic error.
-        let legacyTools = ["sbin/ishsv", "opt/.theoslab-ready", "opt/theos/makefiles/common.mk",
-                           "usr/bin/clang", "usr/bin/ld64.lld", "usr/bin/zip", "usr/local/bin/ldid"]
-        let bundled = Bundle.main.resourceURL?.appendingPathComponent("Guest/fs")
-        let bundledReady: Bool = {
-            guard let bundled,
-                  files.fileExists(atPath: bundled.appendingPathComponent("meta.db").path) else { return false }
-            return legacyTools.allSatisfy {
-                files.fileExists(atPath: bundled.appendingPathComponent("data/" + $0).path)
-            }
-        }()
-        Self.note("launch · bundled=\(bundledReady) · storedVersion=\(UserDefaults.standard.integer(forKey: Self.environmentKey)) · free=\(Self.freeSpace(support))")
-        if bundledReady, UserDefaults.standard.integer(forKey: Self.environmentKey) < Self.environmentVersion {
+        let tools = ["sbin/ishsv", "opt/.theoslab-ready", "opt/theos/makefiles/common.mk",
+                     "usr/bin/clang", "usr/bin/ld64.lld", "usr/bin/zip", "usr/local/bin/ldid"]
+        func ready(_ root: URL) -> Bool {
+            files.fileExists(atPath: root.appendingPathComponent("meta.db").path)
+                && tools.allSatisfy { files.fileExists(atPath: root.appendingPathComponent("data/" + $0).path) }
+        }
+
+        let resources = Bundle.main.resourceURL
+        let bundledTree = resources?.appendingPathComponent("Guest/fs")
+        // The environment ships packed: ~19k loose files would be re-hashed by every
+        // code-signing pass, so the bundle only carries one archive.
+        let candidates = [resources?.appendingPathComponent("Guest/fs.tar"),
+                          (try? files.url(for: .documentDirectory, in: .userDomainMask,
+                                          appropriateFor: nil, create: false))?
+                            .appendingPathComponent("rootfs.tar")]
+        let archive = candidates.compactMap { $0 }.first { files.fileExists(atPath: $0.path) }
+        let treeReady = bundledTree.map(ready) ?? false
+        let hasSource = treeReady || archive != nil
+
+        Self.note("launch · tree=\(treeReady) · archive=\(archive?.lastPathComponent ?? "无") · storedVersion=\(UserDefaults.standard.integer(forKey: Self.environmentKey)) · free=\(Self.freeSpace(support))")
+
+        if hasSource, UserDefaults.standard.integer(forKey: Self.environmentKey) < Self.environmentVersion {
             // A rootfs extracted by an older build stays in the container forever, so the
             // SDKs shipped with this build would never appear. Replace it once.
             for stale in [legacy, bundledRoot] where files.fileExists(atPath: stale.path) {
@@ -96,33 +106,65 @@ final class TheosRuntime: @unchecked Sendable {
                 Self.note("removed stale rootfs \(stale.lastPathComponent)")
             }
         }
-        var root = legacyTools.allSatisfy { files.fileExists(atPath: legacy.appendingPathComponent("data/" + $0).path) }
-            ? legacy : bundledRoot
-        if !files.fileExists(atPath: root.path) {
-            guard let bundled, bundledReady else {
+
+        let root = ready(legacy) ? legacy : bundledRoot
+        if !ready(root) {
+            guard hasSource else {
                 throw WorkspaceError.message("安装包缺少内嵌的 Theos 构建环境。")
             }
-            let staging = support.appendingPathComponent(UUID().uuidString)
-            defer { try? files.removeItem(at: staging) }
-            let needed = Self.directorySize(bundled)
-            if let free = Self.freeBytes(support), needed > 0, free < needed {
-                throw WorkspaceError.message("存储空间不足：构建环境需要约 \(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file))，当前可用 \(ByteCountFormatter.string(fromByteCount: free, countStyle: .file))。清理后重新打开 App。")
-            }
-            Self.note("extracting environment → \(root.lastPathComponent) · size=\(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file))")
-            try files.copyItem(at: bundled, to: staging)
-            try files.moveItem(at: staging, to: root)
-            guard files.fileExists(atPath: root.appendingPathComponent("meta.db").path) else {
+            if files.fileExists(atPath: root.path) {
                 try? files.removeItem(at: root)
-                throw WorkspaceError.message("解压构建环境失败（meta.db 缺失），请重试。")
+                Self.note("dropped incomplete rootfs")
             }
-            Self.note("extracted · free=\(Self.freeSpace(support))")
+            try install(root: root, tree: treeReady ? bundledTree : nil, archive: archive, support: support)
+            guard ready(root) else {
+                try? files.removeItem(at: root)
+                throw WorkspaceError.message("解压构建环境失败（环境不完整），请重试。")
+            }
+            Self.note("environment ready · free=\(Self.freeSpace(support))")
         }
-        var resources = URLResourceValues()
-        resources.isExcludedFromBackup = true
-        try? root.setResourceValues(resources)
+        var resources2 = URLResourceValues()
+        resources2.isExcludedFromBackup = true
+        try? root.setResourceValues(resources2)
         try kernel.boot(.init(rootfsPath: root.path))
         UserDefaults.standard.set(Self.environmentVersion, forKey: Self.environmentKey)
         Self.note("kernel booted · \(root.lastPathComponent)")
+    }
+
+    /// Materialises the environment into `root`, either by copying a pre-extracted
+    /// directory or by unpacking the bundled archive.
+    private func install(root: URL, tree: URL?, archive: URL?, support: URL) throws {
+        let files = FileManager.default
+        var needed: Int64 = 0
+        if let tree {
+            needed = Self.directorySize(tree)
+        } else if let archive {
+            let size = (try? files.attributesOfItem(atPath: archive.path))?[.size] as? NSNumber
+            needed = Int64(Double(size?.int64Value ?? 0) * 1.2)
+        }
+        if let free = Self.freeBytes(support), needed > 0, free < needed {
+            throw WorkspaceError.message("存储空间不足：构建环境需要约 \(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file))，当前可用 \(ByteCountFormatter.string(fromByteCount: free, countStyle: .file))。清理后重新打开 App。")
+        }
+
+        let staging = support.appendingPathComponent(UUID().uuidString)
+        defer { try? files.removeItem(at: staging) }
+        try files.createDirectory(at: staging, withIntermediateDirectories: true)
+
+        if let tree {
+            Self.note("copying environment → \(root.lastPathComponent) · size=\(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file))")
+            let temporary = staging.appendingPathComponent("tree")
+            try files.copyItem(at: tree, to: temporary)
+            try files.moveItem(at: temporary, to: root)
+        } else if let archive {
+            Self.note("unpacking \(archive.lastPathComponent) → \(root.lastPathComponent) · size=\(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file))")
+            let count = try RootfsArchive.extract(archive, to: staging) { Self.note($0) }
+            guard count > 0 else {
+                throw WorkspaceError.message("构建环境归档为空，请重新安装 App。")
+            }
+            try files.moveItem(at: staging, to: root)
+        } else {
+            throw WorkspaceError.message("安装包缺少内嵌的 Theos 构建环境。")
+        }
     }
 
     static func freeSpace(_ url: URL) -> String {
@@ -161,6 +203,12 @@ final class TheosRuntime: @unchecked Sendable {
             let root = support.appendingPathComponent(name)
             let exists = files.fileExists(atPath: root.appendingPathComponent("meta.db").path)
             lines.append("\(name)：\(exists ? "已就绪" : "不存在")")
+        }
+        let packaged = Bundle.main.resourceURL?.appendingPathComponent("Guest/fs.tar")
+        if let packaged, let size = (try? files.attributesOfItem(atPath: packaged.path))?[.size] as? NSNumber {
+            lines.append("内嵌归档：\(ByteCountFormatter.string(fromByteCount: size.int64Value, countStyle: .file))")
+        } else {
+            lines.append("内嵌归档：无")
         }
         if kernel.isRunning {
             lines.append("Linux 内核：运行中")
