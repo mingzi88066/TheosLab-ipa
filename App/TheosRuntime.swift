@@ -27,7 +27,7 @@ final class TheosRuntime: @unchecked Sendable {
 
     /// Bump whenever the embedded image changes (new SDK, new toolchain package).
     /// Installs left over from an older build are dropped and re-copied once.
-    private static let environmentVersion = 3
+    private static let environmentVersion = 4
     private static let environmentKey = "theoslab.environmentVersion"
     static let bootLock = NSLock()
     private(set) static var lastBootError: String?
@@ -62,8 +62,9 @@ final class TheosRuntime: @unchecked Sendable {
             try start()
             Self.lastBootError = nil
         } catch {
-            Self.lastBootError = error.localizedDescription
-            Self.note("boot failed: \(error.localizedDescription)")
+            let text = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+            Self.lastBootError = text
+            Self.note("boot failed: \(text)")
             throw error
         }
     }
@@ -74,7 +75,9 @@ final class TheosRuntime: @unchecked Sendable {
                                     appropriateFor: nil, create: true)
         let legacy = support.appendingPathComponent("Alpine-0.3.3")
         let bundledRoot = support.appendingPathComponent("Alpine-Offline-1")
-        let legacyTools = ["opt/.theoslab-ready", "opt/theos/makefiles/common.mk",
+        // `/sbin/ishsv` is the PID-1 supervisor the kernel execve's; without it the
+        // embedded Linux never starts and boot only reports a generic error.
+        let legacyTools = ["sbin/ishsv", "opt/.theoslab-ready", "opt/theos/makefiles/common.mk",
                            "usr/bin/clang", "usr/bin/ld64.lld", "usr/bin/zip", "usr/local/bin/ldid"]
         let bundled = Bundle.main.resourceURL?.appendingPathComponent("Guest/fs")
         let bundledReady: Bool = {
