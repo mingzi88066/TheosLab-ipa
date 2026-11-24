@@ -107,7 +107,7 @@ final class TheosRuntime: @unchecked Sendable {
             }
         }
 
-        let root = ready(legacy) ? legacy : bundledRoot
+        var root = ready(legacy) ? legacy : bundledRoot
         if !ready(root) {
             guard hasSource else {
                 throw WorkspaceError.message("安装包缺少内嵌的 Theos 构建环境。")
