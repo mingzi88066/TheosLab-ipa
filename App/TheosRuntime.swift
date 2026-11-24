@@ -25,7 +25,15 @@ final class TheosRuntime: @unchecked Sendable {
         "HOME": "/root", "THEOS": "/opt/theos", "LC_ALL": "C.UTF-8", "TMPDIR": "/tmp"
     ]
 
+    /// Bump whenever the embedded image changes (new SDK, new toolchain package).
+    /// Installs left over from an older build are dropped and re-copied once.
+    private static let environmentVersion = 2
+    private static let environmentKey = "theoslab.environmentVersion"
+    private static let bootLock = NSLock()
+
     func boot() throws {
+        Self.bootLock.lock()
+        defer { Self.bootLock.unlock() }
         if kernel.isRunning { return }
         let files = FileManager.default
         let support = try files.url(for: .applicationSupportDirectory, in: .userDomainMask,
@@ -34,14 +42,25 @@ final class TheosRuntime: @unchecked Sendable {
         let bundledRoot = support.appendingPathComponent("Alpine-Offline-1")
         let legacyTools = ["opt/.theoslab-ready", "opt/theos/makefiles/common.mk",
                            "usr/bin/clang", "usr/bin/ld64.lld", "usr/bin/zip", "usr/local/bin/ldid"]
+        let bundled = Bundle.main.resourceURL?.appendingPathComponent("Guest/fs")
+        let bundledReady: Bool = {
+            guard let bundled,
+                  files.fileExists(atPath: bundled.appendingPathComponent("meta.db").path) else { return false }
+            return legacyTools.allSatisfy {
+                files.fileExists(atPath: bundled.appendingPathComponent("data/" + $0).path)
+            }
+        }()
+        if bundledReady, UserDefaults.standard.integer(forKey: Self.environmentKey) < Self.environmentVersion {
+            // A rootfs extracted by an older build stays in the container forever, so the
+            // SDKs shipped with this build would never appear. Replace it once.
+            for stale in [legacy, bundledRoot] where files.fileExists(atPath: stale.path) {
+                try? files.removeItem(at: stale)
+            }
+        }
         var root = legacyTools.allSatisfy { files.fileExists(atPath: legacy.appendingPathComponent("data/" + $0).path) }
             ? legacy : bundledRoot
         if !files.fileExists(atPath: root.path) {
-            guard let bundled = Bundle.main.resourceURL?.appendingPathComponent("Guest/fs"),
-                  files.fileExists(atPath: bundled.appendingPathComponent("meta.db").path),
-                  legacyTools.allSatisfy({
-                      files.fileExists(atPath: bundled.appendingPathComponent("data/" + $0).path)
-                  }) else {
+            guard let bundled, bundledReady else {
                 throw WorkspaceError.message("安装包缺少内嵌的 Theos 构建环境。")
             }
             let staging = support.appendingPathComponent(UUID().uuidString)
@@ -52,6 +71,7 @@ final class TheosRuntime: @unchecked Sendable {
         var resources = URLResourceValues()
         resources.isExcludedFromBackup = true
         try? root.setResourceValues(resources)
+        UserDefaults.standard.set(Self.environmentVersion, forKey: Self.environmentKey)
         try kernel.boot(.init(rootfsPath: root.path))
     }
 

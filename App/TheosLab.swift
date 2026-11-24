@@ -135,7 +135,14 @@ private struct WorkspaceView: View {
             .navigationTitle("Theos Lab")
             .navigationBarHidden(true)
             .modifier(FolderPicker(isPresented: $showFilePicker, types: importKind.types) { result in
-                perform { try finishImport(result.get(), kind: importKind) }
+                switch result {
+                case .success(let selection):
+                    perform { try finishImport(selection, kind: importKind) }
+                case .failure(let error):
+                    guard !(error is PickerCancelled) else { return }
+                    status = error.localizedDescription
+                    openError = status
+                }
             })
             .sheet(item: $projectChoices, onDismiss: {
                 guard let url = pickedProject else { return }
@@ -199,7 +206,10 @@ private struct WorkspaceView: View {
                 }
                 Self.queue.async {
                     let versions = (try? Self.runtime.installedSDKs()) ?? []
-                    DispatchQueue.main.async { sdks = versions }
+                    DispatchQueue.main.async {
+                        sdks = versions
+                        adoptInstalledSDK(versions)
+                    }
                 }
             }
         }
@@ -679,6 +689,13 @@ private struct WorkspaceView: View {
         status = "已保存 \(sourcePath)"
     }
 
+    /// Points the picker at an SDK that actually exists in the environment, so the
+    /// first build does not fail because the stored selection is still download-only.
+    private func adoptInstalledSDK(_ versions: [String]) {
+        guard !versions.isEmpty, !versions.contains(sdk) else { return }
+        sdk = versions.max { $0.compare($1, options: .numeric) == .orderedAscending } ?? versions[0]
+    }
+
     private func prepareSDK() {
         let version = sdk
         run("正在准备 SDK \(version)…") { report in
@@ -783,7 +800,7 @@ private struct WorkspaceView: View {
                 switch result {
                 case .success(let (versions, artifacts, chosen)):
                     sdks = versions
-                    if let chosen { sdk = chosen }
+                    if let chosen { sdk = chosen } else { adoptInstalledSDK(versions) }
                     if !artifacts.isEmpty { outputs = artifacts }
                     status = artifacts.isEmpty ? "操作完成" : "构建完成"
                 case .failure(let error):
