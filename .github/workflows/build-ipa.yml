@@ -1,0 +1,84 @@
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install xcodegen
+        run: |
+          brew update > /dev/null 2>&1 || true
+          brew install xcodegen
+
+      - name: Stage Generated/Guest placeholders
+        run: |
+          mkdir -p Generated/Guest/fs Generated/Guest/Toolchain
+          touch Generated/Guest/fs/.keep Generated/Guest/Toolchain/.keep
+
+      - name: Generate Xcode project
+        run: xcodegen generate && ls -la Generated
+
+      - name: Resolve Swift packages
+        run: xcodebuild -project TheosLab.xcodeproj -scheme TheosLab -resolvePackageDependencies
+
+      - name: Archive (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project TheosLab.xcodeproj \
+            -scheme TheosLab \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/TheosLab.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/DD" \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            PROVISIONING_PROFILE_SPECIFIER="" DEVELOPMENT_TEAM="" \
+            2>&1 | tee "$RUNNER_TEMP/archive.log"
+
+      - name: Package Payload into IPA
+        run: |
+          APP="$RUNNER_TEMP/TheosLab.xcarchive/Products/Applications/TheosLab.app"
+          test -d "$APP" || { echo "app bundle missing"; tail -n 200 "$RUNNER_TEMP/archive.log"; exit 1; }
+          echo "== bundle =="
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist" || true
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist" || true
+          du -sh "$APP"
+          rm -rf "$RUNNER_TEMP/Payload"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload TheosLab-unsigned.ipa
+          ls -lh TheosLab-unsigned.ipa
+
+      - name: Upload IPA to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: TheosLab 2.8 build ${{ github.run_number }}
+          body: Unsigned IPA built by GitHub Actions (macos-15, Release, arm64).
+          files: ${{ runner.temp }}/TheosLab-unsigned.ipa
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-log
+          path: ${{ runner.temp }}/archive.log
+          if-no-files-found: ignore
