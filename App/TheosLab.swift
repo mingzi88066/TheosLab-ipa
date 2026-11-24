@@ -78,6 +78,8 @@ private struct WorkspaceView: View {
     @State private var status = ""
     @State private var busy = false
     @State private var importKind = ImportKind.project
+    @State private var browseDocuments = false
+    @State private var environmentText = ""
     @State private var showFilePicker = false
     @State private var importAfterSettings: ImportKind?
     @State private var projectChoices: ProjectChoices?
@@ -183,6 +185,12 @@ private struct WorkspaceView: View {
                 }
                 .navigationViewStyle(.stack)
             }
+            .sheet(isPresented: $browseDocuments) {
+                DirectoryBrowser(root: (try? documents()) ?? FileManager.default.urls(for: .documentDirectory,
+                                                                                      in: .userDomainMask)[0]) { url in
+                    importProject(at: url)
+                }
+            }
             .sheet(item: $share) { item in ShareSheet(url: item.url) }
             .sheet(isPresented: $buildSettings, onDismiss: {
                 guard let kind = importAfterSettings else { return }
@@ -220,6 +228,7 @@ private struct WorkspaceView: View {
         HStack(spacing: 14) {
             Menu {
                 Button("从「文件」导入项目") { beginImport(.project) }
+                Button("浏览 App 文档…") { browseDocuments = true }
                 Button("刷新项目列表") { perform { try refreshProjects() } }
                 ForEach(projects, id: \.self) { url in
                     Button(url.lastPathComponent) { perform { try openProject(url) } }
@@ -373,6 +382,19 @@ private struct WorkspaceView: View {
                             .font(.body.monospaced()).frame(minHeight: 85)
                             .autocorrectionDisabled().textInputAutocapitalization(.never)
                             .accessibilityLabel("每行一个 LLVM 参数")
+                    }
+                }
+                Section("环境") {
+                    Text(environmentText.isEmpty ? "点「检查环境」查看构建环境状态" : environmentText)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                    Button("检查环境") { refreshEnvironment() }
+                    Button("重建构建环境", role: .destructive) {
+                        buildSettings = false
+                        run("正在重建构建环境…") { _ in
+                            try Self.runtime.rebuildEnvironment()
+                            return (try Self.runtime.installedSDKs(), [], nil)
+                        }
                     }
                 }
             }
@@ -583,6 +605,10 @@ private struct WorkspaceView: View {
     }
 
     private func importProject(_ selection: FolderPicker.Selection) {
+        importProject(at: selection.url)
+    }
+
+    private func importProject(at url: URL) {
         perform {
             try saveFile()
             let root = try documents()
@@ -591,7 +617,7 @@ private struct WorkspaceView: View {
             status = "正在导入项目…"
             Self.projectImportQueue.async {
                 let result = Result {
-                    let imported = try ProjectImport.add(selection.url, to: root)
+                    let imported = try ProjectImport.add(url, to: root)
                     let discovered = (try? ProjectImport.findProjects(in: root)) ?? previousProjects
                     let paths = Set(discovered.map(\.path))
                     return (imported, discovered + imported.filter { !paths.contains($0.path) })
@@ -691,6 +717,14 @@ private struct WorkspaceView: View {
 
     /// Points the picker at an SDK that actually exists in the environment, so the
     /// first build does not fail because the stored selection is still download-only.
+    private func refreshEnvironment() {
+        environmentText = "正在检查…"
+        Self.queue.async {
+            let report = Self.runtime.environmentReport()
+            DispatchQueue.main.async { environmentText = report }
+        }
+    }
+
     private func adoptInstalledSDK(_ versions: [String]) {
         guard !versions.isEmpty, !versions.contains(sdk) else { return }
         sdk = versions.max { $0.compare($1, options: .numeric) == .orderedAscending } ?? versions[0]

@@ -27,14 +27,48 @@ final class TheosRuntime: @unchecked Sendable {
 
     /// Bump whenever the embedded image changes (new SDK, new toolchain package).
     /// Installs left over from an older build are dropped and re-copied once.
-    private static let environmentVersion = 2
+    private static let environmentVersion = 3
     private static let environmentKey = "theoslab.environmentVersion"
-    private static let bootLock = NSLock()
+    static let bootLock = NSLock()
+    private(set) static var lastBootError: String?
+
+    /// Kept in `Documents` so it can be pulled out through the Files app when
+    /// something goes wrong on device.
+    static let logURL: URL? = {
+        guard let documents = try? FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
+                                                           appropriateFor: nil, create: true) else { return nil }
+        return documents.appendingPathComponent("theoslab-boot.log")
+    }()
+
+    static func note(_ text: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        print("[theoslab] \(stamp) \(text)")
+        guard let logURL else { return }
+        let line = stamp + " " + text + "\n"
+        if let handle = try? FileHandle(forWritingTo: logURL) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(line.utf8))
+        } else {
+            try? Data(line.utf8).write(to: logURL)
+        }
+    }
 
     func boot() throws {
         Self.bootLock.lock()
         defer { Self.bootLock.unlock() }
         if kernel.isRunning { return }
+        do {
+            try start()
+            Self.lastBootError = nil
+        } catch {
+            Self.lastBootError = error.localizedDescription
+            Self.note("boot failed: \(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    private func start() throws {
         let files = FileManager.default
         let support = try files.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                     appropriateFor: nil, create: true)
@@ -50,11 +84,13 @@ final class TheosRuntime: @unchecked Sendable {
                 files.fileExists(atPath: bundled.appendingPathComponent("data/" + $0).path)
             }
         }()
+        Self.note("launch · bundled=\(bundledReady) · storedVersion=\(UserDefaults.standard.integer(forKey: Self.environmentKey)) · free=\(Self.freeSpace(support))")
         if bundledReady, UserDefaults.standard.integer(forKey: Self.environmentKey) < Self.environmentVersion {
             // A rootfs extracted by an older build stays in the container forever, so the
             // SDKs shipped with this build would never appear. Replace it once.
             for stale in [legacy, bundledRoot] where files.fileExists(atPath: stale.path) {
                 try? files.removeItem(at: stale)
+                Self.note("removed stale rootfs \(stale.lastPathComponent)")
             }
         }
         var root = legacyTools.allSatisfy { files.fileExists(atPath: legacy.appendingPathComponent("data/" + $0).path) }
@@ -65,14 +101,92 @@ final class TheosRuntime: @unchecked Sendable {
             }
             let staging = support.appendingPathComponent(UUID().uuidString)
             defer { try? files.removeItem(at: staging) }
+            let needed = Self.directorySize(bundled)
+            if let free = Self.freeBytes(support), needed > 0, free < needed {
+                throw WorkspaceError.message("存储空间不足：构建环境需要约 \(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file))，当前可用 \(ByteCountFormatter.string(fromByteCount: free, countStyle: .file))。清理后重新打开 App。")
+            }
+            Self.note("extracting environment → \(root.lastPathComponent) · size=\(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file))")
             try files.copyItem(at: bundled, to: staging)
             try files.moveItem(at: staging, to: root)
+            guard files.fileExists(atPath: root.appendingPathComponent("meta.db").path) else {
+                try? files.removeItem(at: root)
+                throw WorkspaceError.message("解压构建环境失败（meta.db 缺失），请重试。")
+            }
+            Self.note("extracted · free=\(Self.freeSpace(support))")
         }
         var resources = URLResourceValues()
         resources.isExcludedFromBackup = true
         try? root.setResourceValues(resources)
-        UserDefaults.standard.set(Self.environmentVersion, forKey: Self.environmentKey)
         try kernel.boot(.init(rootfsPath: root.path))
+        UserDefaults.standard.set(Self.environmentVersion, forKey: Self.environmentKey)
+        Self.note("kernel booted · \(root.lastPathComponent)")
+    }
+
+    static func freeSpace(_ url: URL) -> String {
+        guard let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+              let bytes = values.volumeAvailableCapacityForImportantUsage else { return "未知" }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    static func freeBytes(_ url: URL) -> Int64? {
+        (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+            .volumeAvailableCapacityForImportantUsage
+    }
+
+    static func directorySize(_ url: URL) -> Int64 {
+        var total: Int64 = 0
+        let keys: [URLResourceKey] = [.fileSizeKey, .isRegularFileKey]
+        if let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys,
+                                                           options: [], errorHandler: nil) {
+            for case let child as URL in enumerator {
+                guard let values = try? child.resourceValues(forKeys: Set(keys)),
+                      values.isRegularFile == true, let size = values.fileSize else { continue }
+                total += Int64(size)
+            }
+        }
+        return total
+    }
+
+    /// Plain-text state of the on-disk environment, shown in build settings.
+    func environmentReport() -> String {
+        let files = FileManager.default
+        var lines: [String] = []
+        guard let support = try? files.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                           appropriateFor: nil, create: true) else { return "无法访问应用容器" }
+        lines.append("环境版本 \(UserDefaults.standard.integer(forKey: Self.environmentKey)) / 期望 \(Self.environmentVersion)")
+        for name in ["Alpine-Offline-1", "Alpine-0.3.3"] {
+            let root = support.appendingPathComponent(name)
+            let exists = files.fileExists(atPath: root.appendingPathComponent("meta.db").path)
+            lines.append("\(name)：\(exists ? "已就绪" : "不存在")")
+        }
+        if kernel.isRunning {
+            lines.append("Linux 内核：运行中")
+            let listing = (try? capture(["/bin/ls", "/opt/theos/sdks"])) ?? Data()
+            let names = String(decoding: listing, as: UTF8.self).split(separator: "\n")
+                .filter { $0.hasPrefix("iPhoneOS") && $0.hasSuffix(".sdk") }
+                .map { String($0.dropFirst("iPhoneOS".count).dropLast(".sdk".count)) }
+            lines.append("已安装 SDK：\(names.isEmpty ? "无" : names.joined(separator: "、"))")
+        } else {
+            lines.append("Linux 内核：未运行")
+        }
+        lines.append("剩余空间：\(Self.freeSpace(support))")
+        if let error = Self.lastBootError { lines.append("最近错误：\(error)") }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Drops the extracted environment so the next boot re-copies the bundled one.
+    func rebuildEnvironment() throws {
+        if kernel.isRunning { try? kernel.shutdown(graceMs: 2_000) }
+        let files = FileManager.default
+        let support = try files.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                    appropriateFor: nil, create: true)
+        for name in ["Alpine-Offline-1", "Alpine-0.3.3"] {
+            let root = support.appendingPathComponent(name)
+            if files.fileExists(atPath: root.path) { try files.removeItem(at: root) }
+        }
+        UserDefaults.standard.set(0, forKey: Self.environmentKey)
+        Self.note("environment reset requested")
+        try boot()
     }
 
     func installedSDKs() throws -> [String] {
