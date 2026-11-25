@@ -63,6 +63,8 @@ final class TerminalModel: ObservableObject {
 
     /// Fired on the main thread once nic.pl has produced a project in Documents.
     var onProjectCreated: ((URL) -> Void)?
+    /// Project the workspace currently has open; `make` syncs it on demand.
+    var attachedProject: URL?
 
     private let runtime = TheosRuntime.shared
     private let queue = DispatchQueue(label: "theoslab.terminal", qos: .userInitiated)
@@ -87,7 +89,7 @@ final class TerminalModel: ObservableObject {
     private static let helpText = """
     可用命令：
       ls · cd <目录> · pwd · cat · grep · find · ps
-      make package        在 /root/work/<项目> 里打包 rootless deb
+      make package        打包 rootless deb（目录里没有 Makefile 时自动同步当前项目）
       make clean          清理构建产物
       clear               清屏
     快捷按钮会替你把当前项目同步到 /root/work 再执行。
@@ -204,7 +206,21 @@ final class TerminalModel: ObservableObject {
             if command == "cd" || command.hasPrefix("cd ") {
                 try changeDirectory(String(command.dropFirst(2)))
             } else {
-                status = try stream(command)
+                var target = cwd
+                if command == "make" || command.hasPrefix("make ") {
+                    if !hasMakefile() {
+                        guard let project = attachedProject else {
+                            append("\n这个目录没有 Makefile。先点「…」→「同步当前项目到 /root/work」，或 cd 到项目目录。\n")
+                            DispatchQueue.main.async { self.running = false }
+                            return
+                        }
+                        target = "/root/work/" + project.lastPathComponent
+                        append("当前目录没有 Makefile，先同步 \(project.lastPathComponent) → \(target)\n")
+                        try runtime.stage(project, at: target) { self.append($0) }
+                        DispatchQueue.main.async { self.cwd = target }
+                    }
+                }
+                status = try stream(command, cwd: target)
             }
         } catch {
             append("\n" + Self.describe(error) + "\n")
@@ -216,9 +232,14 @@ final class TerminalModel: ObservableObject {
         }
     }
 
-    private func stream(_ command: String) throws -> Int32 {
+    private func hasMakefile() -> Bool {
+        let probe = "test -f Makefile -o -f GNUmakefile -o -f makefile && echo yes"
+        return ((try? runtime.shell(probe, cwd: cwd)) ?? "").contains("yes")
+    }
+
+    private func stream(_ command: String, cwd: String? = nil) throws -> Int32 {
         let session = try IshInstance.shared.spawn(.init(argv: ["/bin/sh", "-c", command],
-                                                         cwd: cwd,
+                                                         cwd: cwd ?? self.cwd,
                                                          env: Self.environment,
                                                          allocateTTY: true,
                                                          mergeStderrIntoStdout: true,

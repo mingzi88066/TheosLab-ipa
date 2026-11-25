@@ -52,6 +52,7 @@ struct TerminalView: View {
         }
         .navigationViewStyle(.stack)
         .onAppear {
+            model.attachedProject = project
             model.start()
             typing = true
         }
