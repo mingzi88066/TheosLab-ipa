@@ -202,6 +202,12 @@ private struct WorkspaceView: View {
             )) {
                 Button("好", role: .cancel) { openError = nil }
             } message: { Text(openError ?? "") }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                // Pasting a project into Documents happens in the Files app, so pick it
+                // up as soon as the user comes back instead of asking them to refresh.
+                guard !busy else { return }
+                try? refreshProjects()
+            }
             .onAppear {
                 perform {
                     try refreshProjects()
@@ -230,6 +236,7 @@ private struct WorkspaceView: View {
                 Button("从「文件」导入项目") { beginImport(.project) }
                 Button("浏览 App 文档…") { browseDocuments = true }
                 Button("刷新项目列表") { perform { try refreshProjects() } }
+                Text("若「開啟」无反应：在「文件」里长按项目文件夹 → 拷贝，粘贴到「我的 iPhone → Theos Lab」，再用上面的「浏览 App 文档」")
                 ForEach(projects, id: \.self) { url in
                     Button(url.lastPathComponent) { perform { try openProject(url) } }
                 }
