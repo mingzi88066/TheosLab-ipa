@@ -272,16 +272,16 @@ private struct WorkspaceView: View {
                         .padding(.horizontal, 28)
                 } else {
                     VStack(spacing: 0) {
-                        let shown = Array(projects.prefix(6).enumerated())
-                        ForEach(shown, id: \.element) { item in
+                        ForEach(0..<min(projects.count, 6), id: \.self) { index in
+                            let url = projects[index]
                             Button {
-                                perform { try openProject(item.element) }
+                                perform { try openProject(url) }
                             } label: {
                                 HStack {
                                     Image(systemName: "folder.fill").foregroundStyle(.tint)
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(item.element.lastPathComponent).foregroundStyle(.primary)
-                                        if let path = relativeProjectPath(item.element, in: (try? documents()) ?? item.element),
+                                        Text(url.lastPathComponent).foregroundStyle(.primary)
+                                        if let path = relativeProjectPath(url, in: (try? documents()) ?? url),
                                            path != "." {
                                             Text(path).font(.caption).foregroundStyle(.secondary)
                                         }
@@ -292,7 +292,7 @@ private struct WorkspaceView: View {
                                 .padding(.vertical, 10)
                                 .padding(.horizontal, 14)
                             }
-                            if item.offset < shown.count - 1 { Divider().padding(.leading, 44) }
+                            if index < min(projects.count, 6) - 1 { Divider().padding(.leading, 44) }
                         }
                     }
                     .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
