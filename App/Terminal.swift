@@ -219,6 +219,17 @@ final class TerminalModel: ObservableObject {
                         try runtime.stage(project, at: target) { self.append($0) }
                         DispatchQueue.main.async { self.cwd = target }
                     }
+                    // Rebuilding on top of an old obj directory makes Theos
+                    // sign and rename over the previous binary, which iSH's
+                    // fakefs rejects ("mv: Not a directory"). Start from a
+                    // clean obj so every build links into an empty tree.
+                    if !command.contains("clean") {
+                        let stale = (try? runtime.shell("test -d .theos/obj && echo yes", cwd: target)) ?? ""
+                        if stale.contains("yes") {
+                            append("清理上一次的构建产物…\n")
+                            _ = try? runtime.shell("rm -rf .theos/obj", cwd: target)
+                        }
+                    }
                 }
                 status = try stream(command, cwd: target)
             }

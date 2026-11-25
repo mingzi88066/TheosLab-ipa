@@ -472,9 +472,10 @@ final class TheosRuntime: @unchecked Sendable {
             log("混淆 · \(options.obfuscation.title) \(arguments.joined(separator: " "))\n")
         }
         log("GNU Make · \(options.configuration.rawValue) · \(options.architecture.title) · iPhoneOS \(sdk) · 最低 iOS \(deployment) · \(format.title)\n")
-        if format != .deb {
-            try stream(make + ["all"], cwd: guest, extraEnvironment: compilerEnvironment, log: log)
-        }
+        // Do not build here: artifacts.sh runs `all` for the formats that need
+        // it and `package` (which implies all) for deb. Building twice in one
+        // obj directory makes Theos sign-and-rename over an existing dylib,
+        // which iSH's fakefs rejects with "mv: Not a directory".
         guard let artifactScript = Bundle.main.url(forResource: "artifacts", withExtension: "sh") else {
             throw WorkspaceError.message("App 中缺少产物打包脚本。")
         }

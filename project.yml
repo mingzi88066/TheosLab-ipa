@@ -44,6 +44,6 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Theos Lab
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        MARKETING_VERSION: "2.8.7"
-        CURRENT_PROJECT_VERSION: "8"
+        MARKETING_VERSION: "2.8.8"
+        CURRENT_PROJECT_VERSION: "9"
         CODE_SIGN_STYLE: Automatic

@@ -31,6 +31,14 @@ if [ "$format" = automatic ]; then
     fi
 fi
 printf '%s\n' "Output format: $format"
+# `make package` already builds everything it needs. Compiling here as well
+# would run "all" twice in the same obj directory, and the second pass has to
+# rename the freshly linked binary over the one the first pass produced. iSH's
+# fakefs does not handle that overwrite reliably ("mv: Not a directory"), so
+# only the formats that do not package keep an explicit build step.
+if [ "$format" != deb ]; then
+    /usr/bin/make "$@" all </dev/null
+fi
 case "$format" in
     deb)
         /usr/bin/make "$@" package IPHONE_PACKAGE_FORMAT=deb PACKAGE_FORMAT=deb </dev/null
