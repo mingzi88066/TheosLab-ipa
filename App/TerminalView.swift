@@ -42,35 +42,11 @@ struct TerminalView: View {
             .navigationTitle("终端")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
+                ToolbarItemGroup(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
                 }
-                ToolbarItem(placement: .primaryAction) {
-                    Menu {
-                        Button {
-                            onNewProject()
-                        } label: { Label("新建项目…", systemImage: "plus.square.on.square") }
-                        if let project {
-                            Button {
-                                model.upload(project)
-                            } label: { Label("同步当前项目到 /root/work", systemImage: "arrow.up.doc") }
-                        }
-                        Divider()
-                        Button {
-                            model.interrupt()
-                        } label: { Label("中断", systemImage: "stop.circle") }
-                            .disabled(!model.running)
-                        Button {
-                            model.clear()
-                        } label: { Label("清屏", systemImage: "trash") }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                }
-                if model.running {
-                    ToolbarItem(placement: .principal) {
-                        ProgressView().controlSize(.small)
-                    }
+                ToolbarItemGroup(placement: .primaryAction) {
+                    actions
                 }
             }
         }
@@ -78,6 +54,29 @@ struct TerminalView: View {
         .onAppear {
             model.start()
             typing = true
+        }
+    }
+
+    private var actions: some View {
+        Menu {
+            Button {
+                onNewProject()
+            } label: { Label("新建项目…", systemImage: "plus.square.on.square") }
+            if let project {
+                Button {
+                    model.upload(project)
+                } label: { Label("同步当前项目到 /root/work", systemImage: "arrow.up.doc") }
+            }
+            Divider()
+            Button {
+                model.interrupt()
+            } label: { Label("中断", systemImage: "stop.circle") }
+                .disabled(!model.running)
+            Button {
+                model.clear()
+            } label: { Label("清屏", systemImage: "trash") }
+        } label: {
+            Image(systemName: "ellipsis.circle")
         }
     }
 
@@ -103,6 +102,9 @@ struct TerminalView: View {
     private var chipRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
+                if model.running {
+                    ProgressView().controlSize(.mini)
+                }
                 ForEach(chips) { chip in
                     Button(chip.title) { model.run(chip.command) }
                         .font(.caption.monospaced())
