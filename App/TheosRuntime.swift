@@ -557,7 +557,14 @@ final class TheosRuntime: @unchecked Sendable {
         try session.write(Data(input.utf8))
 
         while true {
-            switch try session.read(timeout: nil) {
+            let event: IshSessionEvent
+            do {
+                event = try session.read(timeout: 180)
+            } catch {
+                try? session.interrupt()
+                throw WorkspaceError.message("nic.pl 长时间没有响应，已中止。")
+            }
+            switch event {
             case .data(let bytes, _, _):
                 log(TerminalText.decode(bytes))
             case .exited(let code, let signal):
@@ -574,8 +581,16 @@ final class TheosRuntime: @unchecked Sendable {
                 }
                 let documents = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
                                                              appropriateFor: nil, create: true)
-                let target = documents.appendingPathComponent("Projects")
-                    .appendingPathComponent(URL(fileURLWithPath: created).lastPathComponent)
+                // Never overwrite an existing project; nic.pl already picked a
+                // unique directory inside the scratch area, so mirror that here.
+                let folder = URL(fileURLWithPath: created).lastPathComponent
+                let projects = documents.appendingPathComponent("Projects")
+                var target = projects.appendingPathComponent(folder)
+                var suffix = 2
+                while FileManager.default.fileExists(atPath: target.path) {
+                    target = projects.appendingPathComponent("\(folder)-\(suffix)")
+                    suffix += 1
+                }
                 return try export(created, to: target)
             }
         }
