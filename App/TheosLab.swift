@@ -81,6 +81,10 @@ private struct WorkspaceView: View {
     @State private var browseDocuments = false
     @State private var environmentText = ""
     @State private var showFilePicker = false
+    @State private var showImportHub = false
+    @State private var pendingOpenProject: URL?
+    @State private var pendingSystemPicker = false
+    @State private var pendingBrowseDocuments = false
     @State private var importAfterSettings: ImportKind?
     @State private var projectChoices: ProjectChoices?
     @State private var pickedProject: URL?
@@ -100,13 +104,7 @@ private struct WorkspaceView: View {
                     }
                     VStack(spacing: 0) {
                         if project == nil {
-                            Spacer()
-                            Label("打开一个 Theos 项目", systemImage: "folder")
-                                .font(.title2.weight(.semibold))
-                            Button("导入项目目录") { beginImport(.project) }
-                                .buttonStyle(.borderedProminent)
-                                .padding(.top, 8)
-                            Spacer()
+                            welcome
                         } else {
                             tabStrip
                             Divider()
@@ -191,6 +189,28 @@ private struct WorkspaceView: View {
                     importProject(at: url)
                 }
             }
+            .sheet(isPresented: $showImportHub, onDismiss: {
+                // Presenting another controller while the sheet is still on screen makes
+                // the system drop it, so defer until the sheet is gone.
+                if let url = pendingOpenProject {
+                    pendingOpenProject = nil
+                    perform { try openProject(url) }
+                } else if pendingSystemPicker {
+                    pendingSystemPicker = false
+                    beginImport(.project, viaHub: true)
+                } else if pendingBrowseDocuments {
+                    pendingBrowseDocuments = false
+                    browseDocuments = true
+                }
+            }) {
+                ImportHub(documents: (try? documents()) ?? FileManager.default.urls(for: .documentDirectory,
+                                                                                    in: .userDomainMask)[0],
+                          projects: $projects,
+                          open: { pendingOpenProject = $0 },
+                          browseDocuments: { pendingBrowseDocuments = true },
+                          useSystemPicker: { pendingSystemPicker = true },
+                          refresh: { perform { try refreshProjects() } })
+            }
             .sheet(item: $share) { item in ShareSheet(url: item.url) }
             .sheet(isPresented: $buildSettings, onDismiss: {
                 guard let kind = importAfterSettings else { return }
@@ -226,17 +246,79 @@ private struct WorkspaceView: View {
                     }
                 }
             }
+            .onOpenURL { url in
+                // Reached through Files → 分享 → 「Theos Lab」. The URL is security scoped,
+                // so keep the selection alive until the background copy finishes.
+                TheosRuntime.note("openURL · \(url.path)")
+                importProject(FolderPicker.Selection(url))
+            }
         }
         .navigationViewStyle(.stack)
+    }
+
+    private var welcome: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                Image(systemName: "hammer.fill")
+                    .font(.system(size: 40, weight: .semibold))
+                    .foregroundStyle(.tint)
+                Text("打开一个 Theos 项目").font(.title2.weight(.semibold))
+
+                if projects.isEmpty {
+                    Text("把含 Makefile 的项目文件夹拷进「我的 iPhone → Theos Lab」，回到这里就会自动列出，点一下即可打开。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 28)
+                } else {
+                    VStack(spacing: 0) {
+                        let shown = Array(projects.prefix(6).enumerated())
+                        ForEach(shown, id: \.element) { item in
+                            Button {
+                                perform { try openProject(item.element) }
+                            } label: {
+                                HStack {
+                                    Image(systemName: "folder.fill").foregroundStyle(.tint)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(item.element.lastPathComponent).foregroundStyle(.primary)
+                                        if let path = relativeProjectPath(item.element, in: (try? documents()) ?? item.element),
+                                           path != "." {
+                                            Text(path).font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                                }
+                                .padding(.vertical, 10)
+                                .padding(.horizontal, 14)
+                            }
+                            if item.offset < shown.count - 1 { Divider().padding(.leading, 44) }
+                        }
+                    }
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
+                    .padding(.horizontal, 20)
+                }
+
+                HStack(spacing: 10) {
+                    Button("导入项目…") { showImportHub = true }
+                        .buttonStyle(.borderedProminent)
+                    Button("刷新") { perform { try refreshProjects() } }
+                        .buttonStyle(.bordered)
+                }
+                .padding(.top, 4)
+            }
+            .padding(.vertical, 28)
+            .frame(maxWidth: .infinity)
+        }
     }
 
     private var commandBar: some View {
         HStack(spacing: 14) {
             Menu {
-                Button("从「文件」导入项目") { beginImport(.project) }
+                Button("导入项目…") { showImportHub = true }
                 Button("浏览 App 文档…") { browseDocuments = true }
                 Button("刷新项目列表") { perform { try refreshProjects() } }
-                Text("若「開啟」无反应：在「文件」里长按项目文件夹 → 拷贝，粘贴到「我的 iPhone → Theos Lab」，再用上面的「浏览 App 文档」")
+                Text("若系统选择器点「開啟」没反应：在「文件」里长按项目文件夹 → 拷贝，粘贴进「我的 iPhone → Theos Lab」，项目会自动列出来")
                 ForEach(projects, id: \.self) { url in
                     Button(url.lastPathComponent) { perform { try openProject(url) } }
                 }
@@ -595,8 +677,12 @@ private struct WorkspaceView: View {
         projects = try ProjectImport.findProjects(in: documents())
     }
 
-    private func beginImport(_ kind: ImportKind) {
+    private func beginImport(_ kind: ImportKind, viaHub: Bool = false) {
         endEditing()
+        if kind == .project && !viaHub {
+            showImportHub = true
+            return
+        }
         importKind = kind
         showFilePicker = true
     }
@@ -612,10 +698,10 @@ private struct WorkspaceView: View {
     }
 
     private func importProject(_ selection: FolderPicker.Selection) {
-        importProject(at: selection.url)
+        importProject(at: selection.url, keeping: selection)
     }
 
-    private func importProject(at url: URL) {
+    private func importProject(at url: URL, keeping scope: AnyObject? = nil) {
         perform {
             try saveFile()
             let root = try documents()
@@ -623,7 +709,9 @@ private struct WorkspaceView: View {
             busy = true
             status = "正在导入项目…"
             Self.projectImportQueue.async {
+                // Hold the security-scoped selection for the whole copy.
                 let result = Result {
+                    _ = scope
                     let imported = try ProjectImport.add(url, to: root)
                     let discovered = (try? ProjectImport.findProjects(in: root)) ?? previousProjects
                     let paths = Set(discovered.map(\.path))

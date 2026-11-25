@@ -57,6 +57,7 @@ struct FolderPicker: ViewModifier {
 
 final class DocumentPicker: NSObject, UIDocumentPickerDelegate {
     private let complete: (Result<FolderPicker.Selection, Error>) -> Void
+    private let started = Date()
     private var settled = false
     private static let association = UnsafeRawPointer(UnsafeMutablePointer<UInt8>.allocate(capacity: 1))
 
@@ -93,10 +94,12 @@ final class DocumentPicker: NSObject, UIDocumentPickerDelegate {
         return top
     }
 
+    private var elapsed: String { String(format: "%.1fs", Date().timeIntervalSince(started)) }
+
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard !settled else { return }
         settled = true
-        TheosRuntime.note("picker · picked \(urls.first?.path ?? "nil")")
+        TheosRuntime.note("picker · picked \(urls.first?.path ?? "nil") · \(elapsed)")
         guard let url = urls.first else {
             complete(.failure(WorkspaceError.message("没有选中任何文件夹。")))
             return
@@ -107,7 +110,7 @@ final class DocumentPicker: NSObject, UIDocumentPickerDelegate {
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
         guard !settled else { return }
         settled = true
-        TheosRuntime.note("picker · cancelled")
+        TheosRuntime.note("picker · cancelled · \(elapsed)")
         complete(.failure(PickerCancelled()))
     }
 }
