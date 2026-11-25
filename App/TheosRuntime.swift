@@ -19,6 +19,8 @@ enum BuildFormat: String, CaseIterable, Identifiable {
 }
 
 final class TheosRuntime: @unchecked Sendable {
+    /// Shared instance for the console; the workspace keeps its own, both talk to the same kernel.
+    static let shared = TheosRuntime()
     private let kernel = IshInstance.shared
     private let environment = [
         "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
@@ -498,6 +500,85 @@ final class TheosRuntime: @unchecked Sendable {
 
     static func isVersion(_ value: String) -> Bool {
         value.range(of: #"^[0-9]+(\.[0-9]+){0,2}$"#, options: .regularExpression) != nil
+    }
+
+    // MARK: - Console helpers
+
+    /// Runs a script and returns its stdout, throwing the guest's stderr on failure.
+    func shell(_ script: String, cwd: String? = nil) throws -> String {
+        try boot()
+        return String(decoding: try capture(["/bin/sh", "-c", script], cwd: cwd), as: UTF8.self)
+    }
+
+    /// Copies a host project into the guest so it can be built from the console.
+    func stage(_ project: URL, at guest: String, log: @escaping (String) -> Void) throws {
+        try boot()
+        _ = try capture(["/bin/mkdir", "-p", guest])
+        try transfer(project, omittingBuildFiles: true, guest: guest, log: log)
+    }
+
+    /// Packs a guest directory back into the app's container.
+    @discardableResult
+    func export(_ guest: String, to host: URL) throws -> URL {
+        let files = FileManager.default
+        let archive = files.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? files.removeItem(at: archive) }
+        try stream(["/bin/busybox", "tar", "-cf", "-", "-C", guest, "."], output: archive, log: { _ in })
+        let parent = host.deletingLastPathComponent()
+        try files.createDirectory(at: parent, withIntermediateDirectories: true)
+        let staging = parent.appendingPathComponent(".export-" + String(UUID().uuidString.prefix(8)))
+        defer { try? files.removeItem(at: staging) }
+        _ = try RootfsArchive.extract(archive, to: staging)
+        if files.fileExists(atPath: host.path) { try files.removeItem(at: host) }
+        try files.moveItem(at: staging, to: host)
+        return host
+    }
+
+    /// Drives `$THEOS/bin/nic.pl` on a real pty, then copies the result into
+    /// `Documents/Projects` so the workspace can open it.
+    func createProject(template: String, name: String, package: String, author: String,
+                       answers: [String], log: @escaping (String) -> Void) throws -> URL {
+        try boot()
+        let scratch = "/root/.nic-" + String(UUID().uuidString.prefix(8))
+        _ = try capture(["/bin/mkdir", "-p", scratch])
+        defer { _ = try? capture(["/bin/rm", "-rf", scratch]) }
+
+        var environment = self.environment
+        environment["TERM"] = "xterm-256color"
+        let argv = ["/opt/theos/bin/nic.pl", "-t", template, "-n", name, "-p", package, "-u", author]
+        let session = try kernel.spawn(.init(argv: argv, cwd: scratch, env: environment,
+                                             allocateTTY: true, mergeStderrIntoStdout: true,
+                                             initialWindowSize: (rows: 40, cols: 160, xpixel: 0, ypixel: 0)))
+        defer { session.close() }
+        // The pty queue holds these until nic.pl asks; empty lines accept the
+        // template's defaults for any prompt we did not model in the form.
+        var input = answers.map { $0 + "\n" }.joined()
+        input += String(repeating: "\n", count: 12)
+        try session.write(Data(input.utf8))
+
+        while true {
+            switch try session.read(timeout: nil) {
+            case .data(let bytes, _, _):
+                log(TerminalText.decode(bytes))
+            case .exited(let code, let signal):
+                guard code == 0, signal == 0 else {
+                    throw WorkspaceError.message("nic.pl 退出码 \(code) · 项目未创建。")
+                }
+                let listing = String(decoding: try capture(["/bin/busybox", "find", scratch,
+                                                            "-mindepth", "1", "-maxdepth", "1", "-type", "d"]),
+                                     as: UTF8.self)
+                guard let created = listing.split(separator: "\n").map(String.init).first(where: { path in
+                    (try? capture(["/bin/busybox", "test", "-f", path + "/Makefile"])) != nil
+                }) else {
+                    throw WorkspaceError.message("nic.pl 没有生成项目目录。")
+                }
+                let documents = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
+                                                             appropriateFor: nil, create: true)
+                let target = documents.appendingPathComponent("Projects")
+                    .appendingPathComponent(URL(fileURLWithPath: created).lastPathComponent)
+                return try export(created, to: target)
+            }
+        }
     }
 
     private func writeResponse(_ arguments: [String], to path: String) throws {

@@ -85,6 +85,11 @@ private struct WorkspaceView: View {
     @State private var pendingOpenProject: URL?
     @State private var pendingSystemPicker = false
     @State private var pendingBrowseDocuments = false
+    @State private var showTerminal = false
+    @State private var showNewProject = false
+    @State private var pendingNewProject = false
+    @State private var pendingTerminalAfterWizard = false
+    @StateObject private var terminal = TerminalModel()
     @State private var importAfterSettings: ImportKind?
     @State private var projectChoices: ProjectChoices?
     @State private var pickedProject: URL?
@@ -211,12 +216,37 @@ private struct WorkspaceView: View {
                           useSystemPicker: { pendingSystemPicker = true },
                           refresh: { perform { try refreshProjects() } })
             }
-            .sheet(item: $share) { item in ShareSheet(url: item.url) }
+            .sheet(isPresented: $showTerminal, onDismiss: {
+                if pendingNewProject {
+                    pendingNewProject = false
+                    showNewProject = true
+                }
+            }) {
+                TerminalView(model: terminal,
+                             project: project,
+                             onNewProject: {
+                                 showTerminal = false
+                                 pendingNewProject = true
+                             })
+            }
+            .sheet(isPresented: $showNewProject, onDismiss: {
+                // Only pop the console when the wizard actually started a job.
+                guard pendingTerminalAfterWizard else { return }
+                pendingTerminalAfterWizard = false
+                showTerminal = true
+            }) {
+                NewProjectView { template, name, package, author, filter, terminate in
+                    pendingTerminalAfterWizard = true
+                    terminal.createProject(template: template, name: name, package: package,
+                                           author: author, filter: filter, terminate: terminate)
+                }
+            }
             .sheet(isPresented: $buildSettings, onDismiss: {
                 guard let kind = importAfterSettings else { return }
                 importAfterSettings = nil
                 beginImport(kind)
             }) { settingsView }
+            .sheet(item: $share) { item in ShareSheet(url: item.url) }
             .alert("无法打开或保存", isPresented: Binding(
                 get: { openError != nil }, set: { if !$0 { openError = nil } }
             )) {
@@ -229,6 +259,14 @@ private struct WorkspaceView: View {
                 try? refreshProjects()
             }
             .onAppear {
+                terminal.onProjectCreated = { url in
+                    showTerminal = false
+                    perform {
+                        try refreshProjects()
+                        try openProject(url)
+                    }
+                    status = "已创建并打开 \(url.lastPathComponent)"
+                }
                 perform {
                     try refreshProjects()
                     if project == nil, !activeProjectPath.isEmpty {
@@ -300,8 +338,10 @@ private struct WorkspaceView: View {
                 }
 
                 HStack(spacing: 10) {
-                    Button("导入项目…") { showImportHub = true }
+                    Button("新建项目…") { showNewProject = true }
                         .buttonStyle(.borderedProminent)
+                    Button("导入项目…") { showImportHub = true }
+                        .buttonStyle(.bordered)
                     Button("刷新") { perform { try refreshProjects() } }
                         .buttonStyle(.bordered)
                 }
@@ -315,6 +355,7 @@ private struct WorkspaceView: View {
     private var commandBar: some View {
         HStack(spacing: 14) {
             Menu {
+                Button("新建项目…") { showNewProject = true }
                 Button("导入项目…") { showImportHub = true }
                 Button("浏览 App 文档…") { browseDocuments = true }
                 Button("刷新项目列表") { perform { try refreshProjects() } }
@@ -351,6 +392,9 @@ private struct WorkspaceView: View {
                 }
                 Button("导入本地 SDK") { beginImport(.sdk) }
             } label: { Label(sdk, systemImage: "cpu") }
+            Button { showTerminal = true } label: { Image(systemName: "terminal") }
+                .accessibilityLabel("终端")
+                .keyboardShortcut("t", modifiers: .command)
             Button { buildSettings = true } label: { Image(systemName: "slider.horizontal.3") }
                 .accessibilityLabel("构建设置")
             Button(action: build) {
